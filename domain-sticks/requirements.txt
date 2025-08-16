@@ -1,0 +1,37 @@
+# Core dependencies
+python-dotenv==1.0.0
+requests==2.31.0
+beautifulsoup4==4.12.2
+crawl4ai==0.2.77
+ffmpeg-python==0.2.0
+Pillow==10.2.0
+
+# Database
+sqlalchemy==2.0.25
+alembic==1.13.1
+psycopg2-binary==2.9.9
+
+# AI/ML
+openai==1.12.0  # For DeepSeek v3 API compatibility
+
+# YouTube API
+google-api-python-client==2.116.0
+google-auth-httplib2==0.2.0
+google-auth-oauthlib==1.2.0
+
+# Media processing
+moviepy==1.0.3
+numpy==1.26.3
+
+# Utilities
+click==8.1.7
+pydantic==2.5.3
+pydantic-settings==2.1.0
+loguru==0.7.2
+tenacity==8.2.3
+tqdm==4.66.1
+
+# Testing
+pytest==7.4.4
+pytest-asyncio==0.23.3
+pytest-mock==3.12.0
