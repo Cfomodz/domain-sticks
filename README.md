@@ -8,6 +8,8 @@ An automated pipeline for creating short-form vertical videos from public domain
 - **AI Script Generation**: Uses DeepSeek v3 to create engaging 45-second scripts
 - **Media Search & Caching**: Finds and caches public domain media from OpenVerse
 - **Video Processing**: Creates vertical videos (9:16) with text overlays and effects
+- **Audio-to-Video Processing**: Convert audio files to videos with transcription and relevant visuals
+- **Shortform Content Generation**: AI-powered analysis to create viral short clips from longer content
 - **YouTube Integration**: Automatic metadata generation and upload capabilities
 - **Deduplication System**: Prevents reprocessing of same URLs
 - **Workflow Management**: Organized pipeline with distinct processing stages
@@ -16,10 +18,22 @@ An automated pipeline for creating short-form vertical videos from public domain
 
 The system follows a modular architecture with distinct stages:
 
+### URL-based Pipeline
 ```
 URL → Scraping → Script Generation → Media Search → Video Processing → Upload
          ↓              ↓                 ↓              ↓              ↓
     [Database]    [DeepSeek v3]    [OpenVerse]      [FFmpeg]      [YouTube]
+```
+
+### Audio-to-Video Pipeline
+```
+Audio → Transcription → Keyword Extraction → Media Search → Video Creation → Shortform Analysis
+  ↓         ↓                 ↓                 ↓              ↓              ↓
+[File]   [Whisper]       [NLP/AI]         [OpenVerse]    [MoviePy]    [DeepSeek v3]
+                                                             ↓
+                                                    Shorts Generation
+                                                          ↓
+                                                     [FFmpeg Clips]
 ```
 
 ### Workflow Stages
@@ -34,6 +48,38 @@ URL → Scraping → Script Generation → Media Search → Video Processing →
 8. **Upload**: Publishing to YouTube
 9. **Published**: Completed projects
 
+## Audio-to-Video Processing 🎵
+
+The system now supports converting audio files directly into engaging videos with automatic shortform content generation:
+
+### Key Features
+
+- **Speech Transcription**: Uses OpenAI Whisper for accurate speech-to-text with word-level timing
+- **Keyword Extraction**: Automatically identifies important keywords from transcribed content
+- **Visual Media Search**: Finds relevant public domain images based on extracted keywords
+- **Video Generation**: Creates full-length videos combining audio, transcription, and visuals
+- **AI-Powered Shortform Analysis**: Uses DeepSeek to identify viral-worthy segments
+- **Non-Destructive Clipping**: Generates shortform clips without re-encoding the main video
+- **Metadata Management**: Organizes shorts as child objects with titles, descriptions, and tags
+
+### Workflow
+
+1. **Audio Input**: Place audio files (MP3, WAV, M4A, etc.) in the ingestion directory
+2. **Transcription**: Whisper analyzes speech and generates word-level timestamps  
+3. **Content Analysis**: Extract keywords and analyze content structure
+4. **Media Sourcing**: Search for relevant public domain images and videos
+5. **Video Creation**: Combine audio, transcript overlays, and visual media
+6. **Shortform Generation**: AI identifies compelling segments for short clips
+7. **Clip Creation**: Generate individual short videos with metadata
+8. **Database Storage**: Track all content with relationships and metadata
+
+### Supported Formats
+
+- **Audio Input**: MP3, WAV, M4A, AAC, FLAC, OGG
+- **Video Output**: MP4 (9:16 vertical format)
+- **Transcription**: Multiple languages supported by Whisper
+- **Metadata**: JSON structure with titles, descriptions, tags, and timing
+
 ## Installation 🚀
 
 ### Prerequisites
@@ -44,6 +90,11 @@ URL → Scraping → Script Generation → Media Search → Video Processing →
 - YouTube API credentials
 - DeepSeek API key
 - OpenVerse API credentials (optional)
+
+#### For Audio-to-Video Processing (Optional)
+- OpenAI Whisper (`pip install openai-whisper`)
+- Additional audio codecs for FFmpeg
+- Sufficient storage for audio transcription models
 
 ### Setup
 
@@ -157,8 +208,32 @@ Check project status:
 python -m src.driver status "project_name"
 ```
 
+### Audio-to-Video Processing
+
+Process a single audio file:
+```bash
+python -m src.driver process-audio "path/to/audio.mp3"
+
+# With options
+python -m src.driver process-audio "path/to/audio.mp3" \
+    --name "my_audio_project" \
+    --no-shorts  # Skip shortform generation
+```
+
+Process all audio files in ingestion directory:
+```bash
+python -m src.driver process-all-audio
+python -m src.driver process-all-audio --no-shorts
+```
+
+Show shortform clips for a project:
+```bash
+python -m src.driver show-shorts "project_name"
+```
+
 ### Python API
 
+#### URL Processing
 ```python
 from src.driver import DomainSticksDriver
 
@@ -171,6 +246,39 @@ result = await driver.process_url(
     project_name="my_video",
     auto_upload=True,
     focus="creator"  # or "subject", "work", "auto"
+)
+```
+
+#### Audio Processing
+```python
+from src.driver import DomainSticksDriver
+from src.modules.audio_video_processor import AudioVideoProcessor
+
+# Initialize driver
+driver = DomainSticksDriver()
+
+# Process a single audio file
+result = await driver.process_audio_file(
+    audio_file_path="path/to/audio.mp3",
+    project_name="my_audio_project",
+    generate_shorts=True
+)
+
+# Process all audio files
+results = await driver.process_all_audio_files(
+    generate_shorts=True
+)
+
+# Direct processor usage
+from src.models.database import DatabaseManager
+from src.config.settings import settings
+
+db_manager = DatabaseManager(settings.database_url)
+processor = AudioVideoProcessor(db_manager)
+
+result = await processor.process_audio_file(
+    Path("audio.mp3"),
+    generate_shorts=True
 )
 
 # Check result

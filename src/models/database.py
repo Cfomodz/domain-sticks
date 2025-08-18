@@ -123,6 +123,8 @@ class Project(Base):
     source_url = relationship("SourceURL", back_populates="projects")
     media = relationship("Media", secondary=project_media, back_populates="projects")
     segments = relationship("ProjectSegment", back_populates="project")
+    shortform_clips = relationship("ShortformClip", back_populates="project")
+    audio_project = relationship("AudioProject", back_populates="project", uselist=False)
 
 
 class ProjectSegment(Base):
@@ -144,6 +146,107 @@ class ProjectSegment(Base):
     # Unique constraint
     __table_args__ = (
         Index('idx_project_segment', 'project_id', 'segment_number', unique=True),
+    )
+
+
+class ShortformClip(Base):
+    """Track shortform clips generated from main videos."""
+    __tablename__ = 'shortform_clips'
+    
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    project_id = Column(String(36), ForeignKey('projects.id'), nullable=False)
+    clip_number = Column(Integer, nullable=False)
+    title = Column(String, nullable=False)
+    description = Column(Text)
+    
+    # Timing information
+    start_time = Column(Integer, nullable=False)  # in seconds from original video
+    end_time = Column(Integer, nullable=False)  # in seconds from original video
+    duration = Column(Integer, nullable=False)  # clip duration in seconds
+    
+    # File paths
+    video_path = Column(String, nullable=False)
+    metadata_path = Column(String)
+    thumbnail_path = Column(String)
+    
+    # Content metadata
+    hook = Column(Text)  # The hook/attention-grabbing element
+    tags = Column(JSON)  # List of hashtags/keywords
+    shortform_metadata = Column(JSON)  # Additional metadata specific to shortform content
+    
+    # Status and dates
+    status = Column(String, default='pending')  # pending, approved, uploaded, published
+    created_date = Column(DateTime, default=datetime.utcnow)
+    updated_date = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Platform-specific metadata
+    youtube_id = Column(String)
+    youtube_url = Column(String)
+    tiktok_id = Column(String)
+    instagram_id = Column(String)
+    upload_date = Column(DateTime)
+    
+    # Performance metrics
+    views = Column(Integer, default=0)
+    likes = Column(Integer, default=0)
+    shares = Column(Integer, default=0)
+    comments = Column(Integer, default=0)
+    
+    # Relationships
+    project = relationship("Project", back_populates="shortform_clips")
+    
+    # Indexes and constraints
+    __table_args__ = (
+        Index('idx_project_clip', 'project_id', 'clip_number', unique=True),
+        Index('idx_shortform_status', 'status'),
+        Index('idx_shortform_created', 'created_date'),
+    )
+
+
+class AudioProject(Base):
+    """Track audio-to-video projects specifically."""
+    __tablename__ = 'audio_projects'
+    
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    project_id = Column(String(36), ForeignKey('projects.id'), nullable=False)
+    
+    # Audio source information
+    audio_file_path = Column(String, nullable=False)
+    audio_duration = Column(Integer)  # in seconds
+    audio_format = Column(String)
+    audio_size = Column(Integer)  # file size in bytes
+    
+    # Transcription data
+    transcription_text = Column(Text)
+    transcription_language = Column(String)
+    transcription_confidence = Column(JSON)  # Confidence scores per segment
+    word_timestamps = Column(JSON)  # Word-level timing data
+    
+    # Processing metadata
+    whisper_model_used = Column(String, default='base')
+    processing_time = Column(Integer)  # in seconds
+    keywords_extracted = Column(JSON)  # List of extracted keywords
+    
+    # Shortform generation
+    shortform_analysis_prompt = Column(Text)
+    shortform_analysis_response = Column(JSON)
+    shortform_clips_count = Column(Integer, default=0)
+    
+    # Status
+    transcription_status = Column(String, default='pending')  # pending, completed, failed
+    video_generation_status = Column(String, default='pending')
+    shortform_generation_status = Column(String, default='pending')
+    
+    created_date = Column(DateTime, default=datetime.utcnow)
+    updated_date = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Relationships
+    project = relationship("Project", back_populates="audio_project")
+    
+    # Indexes
+    __table_args__ = (
+        Index('idx_audio_transcription_status', 'transcription_status'),
+        Index('idx_audio_created', 'created_date'),
     )
 
 

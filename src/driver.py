@@ -14,6 +14,7 @@ from src.modules.script_generator import ScriptGenerator
 from src.modules.media_search import MediaSearcher
 from src.modules.video_processor import VideoProcessor
 from src.modules.youtube_uploader import YouTubeUploader
+from src.modules.audio_video_processor import AudioVideoProcessor, AudioBatchProcessor
 from src.utils.logger import log
 
 
@@ -39,6 +40,15 @@ class DomainSticksDriver:
         except ImportError as e:
             log.warning(f"Video processing not available: {e}")
             self.video_processor = None
+        
+        # Audio-video processor is optional - only initialize if dependencies are available  
+        try:
+            self.audio_video_processor = AudioVideoProcessor(self.db_manager)
+            self.audio_batch_processor = AudioBatchProcessor(self.db_manager)
+        except ImportError as e:
+            log.warning(f"Audio-video processing not available: {e}")
+            self.audio_video_processor = None
+            self.audio_batch_processor = None
             
         self.youtube_uploader = YouTubeUploader(self.db_manager)
         
@@ -234,6 +244,67 @@ class DomainSticksDriver:
                 })
         
         return results
+    
+    async def process_audio_file(
+        self,
+        audio_file_path: str,
+        project_name: Optional[str] = None,
+        generate_shorts: bool = True
+    ) -> Dict[str, Any]:
+        """
+        Process an audio file to create a full video and optional shorts.
+        
+        Args:
+            audio_file_path: Path to the audio file
+            project_name: Optional project name (generated if not provided)
+            generate_shorts: Whether to generate shortform content clips
+            
+        Returns:
+            Dictionary with processing results
+        """
+        if not self.audio_video_processor:
+            raise ValueError("Audio-video processing not available. Please install required dependencies.")
+        
+        try:
+            audio_path = Path(audio_file_path)
+            if not audio_path.exists():
+                raise FileNotFoundError(f"Audio file not found: {audio_file_path}")
+            
+            log.info(f"Starting audio processing for: {audio_file_path}")
+            
+            # Process the audio file
+            result = await self.audio_video_processor.process_audio_file(
+                audio_path,
+                project_name=project_name,
+                generate_shorts=generate_shorts
+            )
+            
+            return result
+            
+        except Exception as e:
+            log.error(f"Error processing audio file: {str(e)}")
+            raise
+    
+    async def process_all_audio_files(
+        self,
+        generate_shorts: bool = True
+    ) -> List[Dict[str, Any]]:
+        """Process all audio files in the ingestion directory."""
+        if not self.audio_batch_processor:
+            raise ValueError("Audio batch processing not available. Please install required dependencies.")
+        
+        try:
+            log.info("Starting batch audio processing...")
+            
+            results = await self.audio_batch_processor.process_ingestion_directory(
+                generate_shorts=generate_shorts
+            )
+            
+            return results
+            
+        except Exception as e:
+            log.error(f"Error processing audio files: {str(e)}")
+            raise
     
     async def process_workflow_stage(self, stage: str):
         """Process all projects in a specific workflow stage."""
@@ -493,6 +564,105 @@ def status(project_name):
         
         if project.video_path:
             click.echo(f"📹 Video: {project.video_path}")
+        
+        # Show audio project details if it exists
+        if project.audio_project:
+            click.echo(f"🎵 Audio Source: {project.audio_project.audio_file_path}")
+            click.echo(f"🔤 Transcription: {project.audio_project.transcription_status}")
+            click.echo(f"📱 Shorts: {project.audio_project.shortform_clips_count}")
+
+
+@cli.command()
+@click.argument('audio_file_path', type=click.Path(exists=True))
+@click.option('--name', help='Project name')
+@click.option('--no-shorts', is_flag=True, help='Skip shortform content generation')
+def process_audio(audio_file_path, name, no_shorts):
+    """Process an audio file to create videos and shorts."""
+    driver = DomainSticksDriver()
+    
+    try:
+        result = asyncio.run(driver.process_audio_file(
+            audio_file_path, 
+            project_name=name,
+            generate_shorts=not no_shorts
+        ))
+        
+        if result["status"] == "success":
+            click.echo(f"✅ Successfully processed audio: {result['project_name']}")
+            click.echo(f"📹 Main video: {result['main_video']['video_path']}")
+            click.echo(f"⏱️ Duration: {result['main_video']['duration']:.1f}s")
+            click.echo(f"🔍 Keywords: {', '.join(result['keywords'][:5])}")
+            
+            if result.get("shorts"):
+                click.echo(f"📱 Generated {result['shorts_count']} shortform clips:")
+                for i, short in enumerate(result["shorts"], 1):
+                    click.echo(f"  {i}. {short['metadata']['title']} ({short['metadata']['duration']:.1f}s)")
+        else:
+            click.echo(f"❌ Processing failed: {result.get('message', 'Unknown error')}")
+    
+    except Exception as e:
+        click.echo(f"❌ Error: {str(e)}")
+
+
+@cli.command()
+@click.option('--no-shorts', is_flag=True, help='Skip shortform content generation')
+def process_all_audio(no_shorts):
+    """Process all audio files in the ingestion directory."""
+    driver = DomainSticksDriver()
+    
+    try:
+        results = asyncio.run(driver.process_all_audio_files(
+            generate_shorts=not no_shorts
+        ))
+        
+        success_count = sum(1 for r in results if r.get("status") == "success")
+        total_shorts = sum(r.get("shorts_count", 0) for r in results if r.get("status") == "success")
+        
+        click.echo(f"\n📊 Audio batch processing complete:")
+        click.echo(f"✅ Successful: {success_count}")
+        click.echo(f"❌ Failed: {len(results) - success_count}")
+        click.echo(f"📱 Total shorts generated: {total_shorts}")
+        
+        # Show details for successful projects
+        for result in results:
+            if result.get("status") == "success":
+                click.echo(f"\n🎵 {result['project_name']}:")
+                click.echo(f"  📹 Video: {result['main_video']['video_path']}")
+                if result.get("shorts"):
+                    click.echo(f"  📱 Shorts: {result['shorts_count']}")
+    
+    except Exception as e:
+        click.echo(f"❌ Error: {str(e)}")
+
+
+@cli.command()
+@click.argument('project_name')
+def show_shorts(project_name):
+    """Show shortform clips for a project."""
+    driver = DomainSticksDriver()
+    
+    with driver.db_manager as session:
+        project = session.query(Project).filter_by(name=project_name).first()
+        
+        if not project:
+            click.echo(f"❌ Project not found: {project_name}")
+            return
+        
+        if not project.shortform_clips:
+            click.echo(f"📱 No shortform clips found for: {project_name}")
+            return
+        
+        click.echo(f"📱 Shortform clips for: {project_name}")
+        click.echo("=" * 50)
+        
+        for clip in project.shortform_clips:
+            click.echo(f"\n📍 Clip #{clip.clip_number}: {clip.title}")
+            click.echo(f"   ⏱️ Duration: {clip.duration}s ({clip.start_time}s - {clip.end_time}s)")
+            click.echo(f"   📄 Description: {clip.description}")
+            click.echo(f"   🎯 Hook: {clip.hook}")
+            click.echo(f"   🏷️ Tags: {', '.join(clip.tags) if clip.tags else 'None'}")
+            click.echo(f"   📹 File: {clip.video_path}")
+            click.echo(f"   ✅ Status: {clip.status}")
 
 
 if __name__ == "__main__":
