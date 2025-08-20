@@ -62,13 +62,38 @@ class AudioVideoProcessor:
         self.media_searcher = MediaSearcher(db_manager)
         self.video_processor = VideoProcessor(db_manager)
         
-        # Initialize Whisper model
+        # Initialize Whisper model with GPU support
         try:
-            self.whisper_model = whisper.load_model("base")
-            log.info("Whisper model loaded successfully")
+            # Check for CUDA availability
+            import torch
+            self.device = "cuda" if torch.cuda.is_available() else "cpu"
+            log.info(f"🖥️ Device detected: {self.device}")
+            if self.device == "cuda":
+                log.info(f"🚀 GPU: {torch.cuda.get_device_name(0)}")
+                log.info(f"🚀 VRAM: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
+            
+            # Load model with numerical stability options for GPU
+            if self.device == "cuda":
+                self.whisper_model = whisper.load_model("base", device=self.device)
+                # Set model to eval mode for stability
+                self.whisper_model.eval()
+                log.info(f"✅ Whisper model loaded successfully on {self.device} with stability options")
+            else:
+                self.whisper_model = whisper.load_model("base", device=self.device)
+                log.info(f"✅ Whisper model loaded successfully on {self.device}")
+        except ImportError:
+            log.warning("⚠️ PyTorch not available, falling back to CPU")
+            self.device = "cpu"
+            try:
+                self.whisper_model = whisper.load_model("base")
+                log.info("✅ Whisper model loaded successfully on CPU")
+            except Exception as e:
+                log.error(f"❌ Failed to load Whisper model: {e}")
+                self.whisper_model = None
         except Exception as e:
-            log.error(f"Failed to load Whisper model: {e}")
+            log.error(f"❌ Failed to load Whisper model: {e}")
             self.whisper_model = None
+            self.device = "cpu"
         
         # Initialize DeepSeek client for shortform analysis
         self.deepseek_client = OpenAI(
@@ -81,12 +106,64 @@ class AudioVideoProcessor:
         self.video_height = settings.video_height
         self.fps = settings.video_fps
         self.bitrate = settings.video_bitrate
+        
+        # Log GPU capabilities
+        self._log_gpu_capabilities()
+    
+    def _log_gpu_capabilities(self):
+        """Log available GPU capabilities for video processing."""
+        log.info("🖥️ GPU Capabilities Summary:")
+        log.info(f"   Device: {getattr(self, 'device', 'Unknown')}")
+        
+        try:
+            import torch
+            if torch.cuda.is_available():
+                log.info(f"   🚀 CUDA Available: Yes")
+                log.info(f"   🚀 GPU Count: {torch.cuda.device_count()}")
+                for i in range(torch.cuda.device_count()):
+                    props = torch.cuda.get_device_properties(i)
+                    log.info(f"   🚀 GPU {i}: {props.name}")
+                    log.info(f"     - Memory: {props.total_memory / 1024**3:.1f} GB")
+                    log.info(f"     - Compute Capability: {props.major}.{props.minor}")
+                
+                # Check for NVENC support (requires newer GPUs)
+                major = torch.cuda.get_device_properties(0).major
+                if major >= 6:  # Maxwell or newer
+                    log.info("   🎬 NVENC Hardware Encoding: Supported")
+                else:
+                    log.info("   🎬 NVENC Hardware Encoding: Not supported (GPU too old)")
+            else:
+                log.info("   ❌ CUDA Available: No")
+                log.info("   ⚠️ GPU acceleration disabled - will use CPU")
+        except ImportError:
+            log.info("   ❌ PyTorch not available")
+            log.info("   ⚠️ GPU acceleration disabled - will use CPU")
+        
+        # Check for ffmpeg NVENC support
+        try:
+            import subprocess
+            result = subprocess.run(['ffmpeg', '-encoders'], capture_output=True, text=True, timeout=5)
+            if 'h264_nvenc' in result.stdout:
+                log.info("   🎬 FFmpeg NVENC: Available")
+            else:
+                log.info("   ❌ FFmpeg NVENC: Not available")
+        except Exception:
+            log.info("   ❓ FFmpeg NVENC: Could not check")
+        
+        log.info("   💡 Recommendations:")
+        if getattr(self, 'device', 'cpu') == 'cpu':
+            log.info("     - Install CUDA-enabled PyTorch for GPU acceleration")
+            log.info("     - Ensure NVIDIA drivers are installed")
+            log.info("     - Consider using a GPU for faster processing")
+        else:
+            log.info("     - GPU acceleration enabled - expect faster processing!")
     
     async def process_audio_file(
         self,
         audio_file_path: Path,
         project_name: Optional[str] = None,
-        generate_shorts: bool = True
+        generate_shorts: bool = True,
+        grayscale: bool = False
     ) -> Dict[str, Any]:
         """
         Process an audio file to create a full video and optional shorts.
@@ -120,6 +197,12 @@ class AudioVideoProcessor:
             
             # Step 3: Search for relevant media
             log.info("Step 3: Searching for relevant media...")
+            log.info(f"🔍 Calling media_searcher.search_media with:")
+            log.info(f"   Keywords: {keywords}")
+            log.info(f"   Media type: image")
+            log.info(f"   Project name: {project_name}")
+            log.info(f"   Limit: 30")
+            
             media_items = await self.media_searcher.search_media(
                 keywords,
                 media_type="image",  # Focus on images for audio-to-video
@@ -127,13 +210,21 @@ class AudioVideoProcessor:
                 limit=30
             )
             
+            log.info(f"✅ Media search completed. Received {len(media_items)} items")
+            for i, item in enumerate(media_items):
+                log.info(f"   Media {i+1}: {item.get('title', 'Untitled')} ({item.get('type', 'unknown')})")
+                log.info(f"     Path: {item.get('file_path', 'No path')}")
+                log.info(f"     Local: {item.get('local_path', 'No local path')}")
+                log.info(f"     Cached: {item.get('cached', False)}")
+            
             # Step 4: Create main video
             log.info("Step 4: Creating main video...")
             main_video_data = await self._create_main_video(
                 audio_file_path,
                 transcription_data,
                 media_items,
-                project_name
+                project_name,
+                grayscale=grayscale
             )
             
             result = {
@@ -171,12 +262,35 @@ class AudioVideoProcessor:
             raise ValueError("Whisper model not available")
         
         try:
-            # Transcribe with word-level timestamps
-            result = self.whisper_model.transcribe(
-                str(audio_file_path),
-                word_timestamps=True,
-                verbose=False
-            )
+            # Transcribe with word-level timestamps and numerical stability
+            transcribe_options = {
+                "word_timestamps": True,
+                "verbose": False,
+                "fp16": False,  # Disable half precision to prevent NaN
+                "temperature": 0.0,  # Use greedy decoding for stability
+            }
+            
+            # Additional GPU stability measures with fallback
+            if self.device == "cuda":
+                import torch
+                try:
+                    with torch.inference_mode():  # Disable gradients for inference
+                        result = self.whisper_model.transcribe(str(audio_file_path), **transcribe_options)
+                    
+                    # Check for NaN values in result (basic validation)
+                    if not result.get("text") or len(result.get("segments", [])) == 0:
+                        raise ValueError("Empty transcription result - possible GPU numerical issue")
+                        
+                except Exception as gpu_error:
+                    log.warning(f"⚠️ GPU transcription failed: {gpu_error}")
+                    log.info("🔄 Falling back to CPU transcription...")
+                    
+                    # Fallback to CPU
+                    cpu_model = whisper.load_model("base", device="cpu")
+                    result = cpu_model.transcribe(str(audio_file_path), **transcribe_options)
+                    del cpu_model  # Clean up memory
+            else:
+                result = self.whisper_model.transcribe(str(audio_file_path), **transcribe_options)
             
             # Process segments to get timing data
             segments = []
@@ -248,30 +362,47 @@ class AudioVideoProcessor:
         audio_file_path: Path,
         transcription_data: Dict[str, Any],
         media_items: List[Dict[str, Any]],
-        project_name: str
+        project_name: str,
+        grayscale: bool = False
     ) -> Dict[str, Any]:
         """Create the main video from audio, transcript, and media."""
         try:
+            log.info(f"🎬 Creating main video for project: {project_name}")
+            log.info(f"📁 Audio file: {audio_file_path}")
+            log.info(f"🖼️ Media items received: {len(media_items)}")
+            
+            for i, item in enumerate(media_items):
+                log.info(f"   Item {i+1}: {item.get('title', 'Untitled')}")
+                log.info(f"     Type: {item.get('type', 'unknown')}")
+                log.info(f"     File path: {item.get('file_path', 'No file_path')}")
+                log.info(f"     Local path: {item.get('local_path', 'No local_path')}")
+            
             # Prepare output path
             output_path = settings.workflow_paths["video_processing"] / f"{project_name}_main.mp4"
             output_path.parent.mkdir(parents=True, exist_ok=True)
+            log.info(f"📹 Output path: {output_path}")
             
             # Load audio
             audio_clip = AudioFileClip(str(audio_file_path))
             duration = audio_clip.duration
+            log.info(f"🎵 Audio duration: {duration} seconds")
             
             # Create video clips from images
+            log.info("🖼️ Creating image sequence...")
             video_clips = self._create_image_sequence(
                 media_items,
                 duration,
-                transcription_data["segments"]
+                transcription_data["segments"],
+                grayscale=grayscale
             )
+            log.info(f"🖼️ Created {len(video_clips)} video clips from images")
             
-            # Create text overlays
-            text_clips = self._create_text_overlays(transcription_data["segments"])
+            # Skip text overlays/subtitles as requested
+            log.info("📝 Skipping text overlays (subtitles) as requested")
             
-            # Combine all elements
-            final_clips = video_clips + text_clips
+            # Use only video clips (no text overlays)
+            final_clips = video_clips
+            log.info(f"🎬 Final clips count: {len(final_clips)}")
             
             # Create composite video
             final_video = CompositeVideoClip(
@@ -279,16 +410,42 @@ class AudioVideoProcessor:
                 size=(self.video_width, self.video_height)
             ).with_audio(audio_clip)
             
-            # Write output
-            final_video.write_videofile(
-                str(output_path),
-                fps=self.fps,
-                codec='libx264',
-                audio_codec='aac',
-                bitrate=self.bitrate,
-                verbose=False,
-                logger=None
-            )
+            # Write output with GPU acceleration if available
+            log.info(f"💾 Writing video to: {output_path}")
+            
+            # Configure GPU-accelerated encoding if CUDA is available
+            if self.device == "cuda":
+                log.info("🚀 Using GPU-accelerated video encoding (NVENC)")
+                # Use NVENC hardware encoder for GPU acceleration
+                final_video.write_videofile(
+                    str(output_path),
+                    fps=self.fps,
+                    codec='h264_nvenc',  # NVIDIA hardware encoder
+                    audio_codec='aac',
+                    bitrate=self.bitrate,
+                    ffmpeg_params=[
+                        '-hwaccel', 'cuda',
+                        '-hwaccel_output_format', 'cuda',
+                        '-preset', 'fast',
+                        '-rc', 'vbr',
+                        '-cq', '23',
+                        '-spatial-aq', '1',
+                        '-temporal-aq', '1'
+                    ]
+                )
+            else:
+                log.info("🖥️ Using CPU-based video encoding")
+                final_video.write_videofile(
+                    str(output_path),
+                    fps=self.fps,
+                    codec='libx264',
+                    audio_codec='aac',
+                    bitrate=self.bitrate,
+                    ffmpeg_params=[
+                        '-preset', 'medium',  # Good balance of speed/quality for CPU
+                        '-crf', '23'          # Constant Rate Factor for quality
+                    ]
+                )
             
             # Clean up
             audio_clip.close()
@@ -312,30 +469,61 @@ class AudioVideoProcessor:
         self,
         media_items: List[Dict[str, Any]],
         total_duration: float,
-        segments: List[Dict[str, Any]]
+        segments: List[Dict[str, Any]],
+        grayscale: bool = False
     ) -> List[ImageClip]:
         """Create a sequence of image clips synchronized with speech segments."""
+        log.info(f"🖼️ _create_image_sequence called with {len(media_items)} media items")
+        log.info(f"⏱️ Total duration: {total_duration} seconds")
+        
         if not media_items:
+            log.warning("❌ No media items provided, creating solid background")
             # Create a solid background if no images
             return [self._create_solid_background(total_duration)]
         
         clips = []
         duration_per_image = max(3, total_duration / len(media_items))
+        log.info(f"⏱️ Duration per image: {duration_per_image} seconds")
         
         for idx, media_item in enumerate(media_items):
+            log.info(f"🖼️ Processing media item {idx+1}/{len(media_items)}")
+            
+            # Check file_path first
             image_path = media_item.get("file_path")
-            if not image_path or not Path(image_path).exists():
+            if not image_path:
+                # Fallback to local_path
+                image_path = media_item.get("local_path")
+            
+            log.info(f"   Raw image path: {image_path}")
+            
+            if not image_path:
+                log.warning(f"❌ Media item {idx+1} has no file_path or local_path, skipping")
                 continue
+            
+            # Ensure path is absolute (resolve relative to project root)
+            if not Path(image_path).is_absolute():
+                image_path = Path.cwd() / image_path
+            
+            log.info(f"   Absolute image path: {image_path}")
+            
+            if not Path(image_path).exists():
+                log.warning(f"❌ Image file does not exist: {image_path}")
+                continue
+            
+            log.info(f"✅ Image file exists: {image_path}")
             
             start_time = idx * duration_per_image
             if start_time >= total_duration:
+                log.info(f"⏹️ Start time {start_time} >= total duration {total_duration}, stopping")
                 break
             
-            # Create image clip
-            img_clip = ImageClip(image_path, duration=min(duration_per_image, total_duration - start_time))
+            # Create image clip (use string path for MoviePy compatibility)
+            log.info(f"🎬 Creating ImageClip from: {image_path}")
+            img_clip = ImageClip(str(image_path), duration=min(duration_per_image, total_duration - start_time))
+            log.info(f"✅ ImageClip created successfully")
             
             # Resize to fit vertical format
-            img_clip = self._resize_image_to_vertical(img_clip)
+            img_clip = self._resize_image_to_vertical(img_clip, grayscale=grayscale)
             
             # Add fade effects
             img_clip = img_clip.with_effects([fadein(0.5), fadeout(0.5)])
@@ -380,24 +568,109 @@ class AudioVideoProcessor:
         
         return text_clips
     
-    def _resize_image_to_vertical(self, clip: ImageClip) -> ImageClip:
-        """Resize image clip to vertical format (9:16)."""
-        target_ratio = self.video_width / self.video_height
-        clip_ratio = clip.w / clip.h
+    def _resize_image_to_vertical(self, clip: ImageClip, grayscale: bool = False) -> ImageClip:
+        """Resize image clip to vertical format (9:16) with proper aspect ratio handling."""
+        log.info(f"🖼️ Processing image: {clip.w}x{clip.h} -> {self.video_width}x{self.video_height}")
+        log.info(f"   Grayscale mode: {grayscale}")
         
-        if clip_ratio > target_ratio:
-            # Image is wider than target - fit height and crop width
-            new_width = int(clip.h * target_ratio)
-            clip = clip.crop(x_center=clip.w/2, width=new_width)
-        else:
-            # Image is taller than target - fit width and crop height  
-            new_height = int(clip.w / target_ratio)
-            clip = clip.crop(y_center=clip.h/2, height=new_height)
-        
-        # Resize to exact dimensions
-        clip = clip.with_effects([resize((self.video_width, self.video_height))])
-        
-        return clip
+        try:
+            # Apply grayscale if requested
+            if grayscale:
+                log.info("🎨 Converting to grayscale...")
+                try:
+                    # Convert to grayscale using numpy
+                    def to_grayscale(get_frame, t):
+                        frame = get_frame(t)
+                        # Convert RGB to grayscale using luminance formula
+                        gray = 0.299 * frame[:,:,0] + 0.587 * frame[:,:,1] + 0.114 * frame[:,:,2]
+                        # Convert back to RGB format by repeating the gray channel
+                        return np.stack([gray, gray, gray], axis=2).astype(np.uint8)
+                    
+                    clip = clip.transform(to_grayscale)
+                    log.info("✅ Grayscale applied successfully")
+                except Exception as e:
+                    log.warning(f"⚠️ Could not apply grayscale: {e}")
+            
+            # Calculate aspect ratios
+            target_ratio = self.video_width / self.video_height  # e.g., 1080/1920 = 0.5625
+            image_ratio = clip.w / clip.h
+            
+            log.info(f"   Target ratio: {target_ratio:.3f} (9:16)")
+            log.info(f"   Image ratio: {image_ratio:.3f}")
+            
+            if abs(image_ratio - target_ratio) < 0.01:
+                # Ratios are very close, just resize
+                log.info("   Ratios match - simple resize")
+                resized_clip = clip.resized((self.video_width, self.video_height))
+            elif image_ratio > target_ratio:
+                # Image is wider than target - scale to fit height, add black bars on sides
+                log.info("   Image wider than target - fitting height with side bars")
+                scale_factor = self.video_height / clip.h
+                new_width = int(clip.w * scale_factor)
+                
+                # Resize maintaining aspect ratio
+                scaled_clip = clip.resized((new_width, self.video_height))
+                
+                # Create composite with black background using CompositeVideoClip
+                background = self._create_black_background(self.video_width, self.video_height)
+                x_offset = (self.video_width - new_width) // 2
+                
+                final_clip = CompositeVideoClip([
+                    background,
+                    scaled_clip.with_position((x_offset, 0))
+                ], size=(self.video_width, self.video_height))
+                
+                resized_clip = final_clip
+                log.info(f"   Scaled to: {new_width}x{self.video_height}, centered with offset {x_offset}")
+            else:
+                # Image is taller than target - scale to fit width, add black bars on top/bottom
+                log.info("   Image taller than target - fitting width with top/bottom bars")
+                scale_factor = self.video_width / clip.w
+                new_height = int(clip.h * scale_factor)
+                
+                # Resize maintaining aspect ratio
+                scaled_clip = clip.resized((self.video_width, new_height))
+                
+                # Create composite with black background using CompositeVideoClip
+                background = self._create_black_background(self.video_width, self.video_height)
+                y_offset = (self.video_height - new_height) // 2
+                
+                final_clip = CompositeVideoClip([
+                    background,
+                    scaled_clip.with_position((0, y_offset))
+                ], size=(self.video_width, self.video_height))
+                
+                resized_clip = final_clip
+                log.info(f"   Scaled to: {self.video_width}x{new_height}, centered with offset {y_offset}")
+            
+            log.info(f"✅ Image processing complete")
+            return resized_clip
+            
+        except Exception as e:
+            log.error(f"❌ Error processing image: {e}")
+            # Ultimate fallback - simple resize (stretching)
+            log.warning("   Using fallback: simple resize (may stretch)")
+            try:
+                clip_processed = clip
+                if grayscale:
+                    # Simple grayscale fallback
+                    log.info("   Applying fallback grayscale...")
+                    try:
+                        def simple_gray(get_frame, t):
+                            frame = get_frame(t)
+                            gray = frame.mean(axis=2, keepdims=True)
+                            return np.repeat(gray, 3, axis=2).astype(np.uint8)
+                        clip_processed = clip.transform(simple_gray)
+                    except:
+                        pass
+                return clip_processed.resized((self.video_width, self.video_height))
+            except:
+                return clip
+    
+    def _create_black_background(self, width: int, height: int) -> ImageClip:
+        """Create a black background clip for letterboxing/pillarboxing."""
+        background_array = np.zeros((height, width, 3), dtype=np.uint8)
+        return ImageClip(background_array, duration=1)  # Duration will be set later
     
     def _create_solid_background(self, duration: float) -> ImageClip:
         """Create a solid color background clip."""
@@ -545,15 +818,34 @@ Respond with a JSON array of segments."""
             safe_title = self._create_safe_filename(title)
             output_path = settings.workflow_paths["video_processing"] / f"{clip_name}_{safe_title}.mp4"
             
-            # Use ffmpeg to extract the clip non-destructively
+            # Use ffmpeg to extract the clip with GPU acceleration if available
             input_stream = ffmpeg.input(main_video_path, ss=start_time, t=end_time-start_time)
-            output_stream = ffmpeg.output(
-                input_stream,
-                str(output_path),
-                vcodec='copy',  # Copy without re-encoding
-                acodec='copy',
-                avoid_negative_ts='make_zero'
-            )
+            
+            if self.device == "cuda":
+                log.info("🚀 Using GPU-accelerated clip extraction")
+                # Use GPU acceleration for clip extraction if we need to re-encode
+                output_stream = ffmpeg.output(
+                    input_stream,
+                    str(output_path),
+                    vcodec='h264_nvenc',  # GPU encoder
+                    acodec='copy',        # Audio copy (no re-encoding needed)
+                    avoid_negative_ts='make_zero',
+                    **{
+                        'hwaccel': 'cuda',
+                        'preset': 'fast',
+                        'rc': 'vbr',
+                        'cq': '23'
+                    }
+                )
+            else:
+                log.info("🖥️ Using CPU-based clip extraction")
+                output_stream = ffmpeg.output(
+                    input_stream,
+                    str(output_path),
+                    vcodec='copy',  # Copy without re-encoding (fastest)
+                    acodec='copy',
+                    avoid_negative_ts='make_zero'
+                )
             
             # Run ffmpeg
             ffmpeg.run(output_stream, overwrite_output=True, quiet=True)

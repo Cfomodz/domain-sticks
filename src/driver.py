@@ -15,6 +15,8 @@ from src.modules.media_search import MediaSearcher
 from src.modules.video_processor import VideoProcessor
 from src.modules.youtube_uploader import YouTubeUploader
 from src.modules.audio_video_processor import AudioVideoProcessor, AudioBatchProcessor
+from src.modules.video_clip_processor import VideoClipProcessor, VideoBatchProcessor
+from src.utils.openverse_auth import get_openverse_auth, setup_openverse_credentials
 from src.utils.logger import log
 
 
@@ -49,6 +51,15 @@ class DomainSticksDriver:
             log.warning(f"Audio-video processing not available: {e}")
             self.audio_video_processor = None
             self.audio_batch_processor = None
+        
+        # Video clip processor is optional - only initialize if dependencies are available
+        try:
+            self.video_clip_processor = VideoClipProcessor(self.db_manager)
+            self.video_batch_processor = VideoBatchProcessor(self.db_manager)
+        except ImportError as e:
+            log.warning(f"Video clip processing not available: {e}")
+            self.video_clip_processor = None
+            self.video_batch_processor = None
             
         self.youtube_uploader = YouTubeUploader(self.db_manager)
         
@@ -249,7 +260,8 @@ class DomainSticksDriver:
         self,
         audio_file_path: str,
         project_name: Optional[str] = None,
-        generate_shorts: bool = True
+        generate_shorts: bool = True,
+        grayscale: bool = False
     ) -> Dict[str, Any]:
         """
         Process an audio file to create a full video and optional shorts.
@@ -276,7 +288,8 @@ class DomainSticksDriver:
             result = await self.audio_video_processor.process_audio_file(
                 audio_path,
                 project_name=project_name,
-                generate_shorts=generate_shorts
+                generate_shorts=generate_shorts,
+                grayscale=grayscale
             )
             
             return result
@@ -304,6 +317,184 @@ class DomainSticksDriver:
             
         except Exception as e:
             log.error(f"Error processing audio files: {str(e)}")
+            raise
+    
+    async def process_video_file(
+        self,
+        video_file_path: str,
+        project_name: Optional[str] = None,
+        generate_shorts: bool = True,
+        max_short_duration: int = 60,
+        min_short_duration: int = 15,
+        convert_to_vertical: bool = True,
+        add_subtitles: bool = False
+    ) -> Dict[str, Any]:
+        """
+        Process a video file to create short clips based on audio analysis.
+        
+        Args:
+            video_file_path: Path to the video file
+            project_name: Optional project name (generated if not provided)
+            generate_shorts: Whether to generate shortform content clips
+            max_short_duration: Maximum duration for shorts (seconds)
+            min_short_duration: Minimum duration for shorts (seconds)
+            convert_to_vertical: Whether to convert clips to vertical format (9:16)
+            add_subtitles: Whether to add subtitles to clips
+            
+        Returns:
+            Dictionary with processing results
+        """
+        if not self.video_clip_processor:
+            raise ValueError("Video clip processing not available. Please install required dependencies.")
+        
+        try:
+            video_path = Path(video_file_path)
+            if not video_path.exists():
+                raise FileNotFoundError(f"Video file not found: {video_file_path}")
+            
+            log.info(f"Starting video processing for: {video_file_path}")
+            
+            # Process the video file
+            result = await self.video_clip_processor.process_video_file(
+                video_path,
+                project_name=project_name,
+                generate_shorts=generate_shorts,
+                max_short_duration=max_short_duration,
+                min_short_duration=min_short_duration,
+                convert_to_vertical=convert_to_vertical,
+                add_subtitles=add_subtitles
+            )
+            
+            return result
+            
+        except Exception as e:
+            log.error(f"Error processing video file: {str(e)}")
+            raise
+    
+    async def process_all_video_files(
+        self,
+        generate_shorts: bool = True,
+        convert_to_vertical: bool = True,
+        add_subtitles: bool = False
+    ) -> List[Dict[str, Any]]:
+        """Process all video files in the ingestion directory."""
+        if not self.video_batch_processor:
+            raise ValueError("Video batch processing not available. Please install required dependencies.")
+        
+        try:
+            log.info("Starting batch video processing...")
+            
+            results = await self.video_batch_processor.process_ingestion_directory(
+                generate_shorts=generate_shorts,
+                convert_to_vertical=convert_to_vertical,
+                add_subtitles=add_subtitles
+            )
+            
+            return results
+            
+        except Exception as e:
+            log.error(f"Error processing video files: {str(e)}")
+            raise
+    
+    async def process_all_content(
+        self,
+        generate_shorts: bool = True,
+        auto_upload: bool = False
+    ) -> Dict[str, Any]:
+        """
+        Process all content in the ingestion directory through all phases.
+        
+        This includes:
+        1. All audio files → video creation
+        2. All URL-based projects in various stages
+        3. Move everything through the complete pipeline
+        
+        Args:
+            generate_shorts: Whether to generate shortform content for audio
+            auto_upload: Whether to automatically upload completed videos
+            
+        Returns:
+            Dictionary with comprehensive processing results
+        """
+        try:
+            log.info("🚀 Starting comprehensive content processing...")
+            log.info("📂 Processing all content types through all phases")
+            
+            results = {
+                "audio_processing": [],
+                "url_processing": [],
+                "stage_processing": {},
+                "summary": {}
+            }
+            
+            # Step 1: Process all audio files in ingestion
+            log.info("🎵 Step 1: Processing audio files...")
+            if self.audio_batch_processor:
+                audio_results = await self.process_all_audio_files(generate_shorts=generate_shorts)
+                results["audio_processing"] = audio_results
+                log.info(f"✅ Processed {len(audio_results)} audio files")
+            else:
+                log.warning("⚠️ Audio processing unavailable - skipping audio files")
+            
+            # Step 1.5: Process all video files in ingestion  
+            log.info("🎬 Step 1.5: Processing video files...")
+            if self.video_batch_processor:
+                video_results = await self.process_all_video_files(generate_shorts=generate_shorts)
+                results["video_processing"] = video_results
+                log.info(f"✅ Processed {len(video_results)} video files")
+            else:
+                log.warning("⚠️ Video processing unavailable - skipping video files")
+            
+            # Step 2: Process all URL-based projects through their stages
+            log.info("🌐 Step 2: Processing URL-based projects through pipeline stages...")
+            
+            stages = ["analysis", "script_generation", "media_search", "video_processing", "metadata"]
+            
+            for stage in stages:
+                try:
+                    log.info(f"📍 Processing stage: {stage}")
+                    stage_result = await self.process_workflow_stage(stage)
+                    results["stage_processing"][stage] = {"status": "completed"}
+                except Exception as e:
+                    log.error(f"❌ Error in stage {stage}: {e}")
+                    results["stage_processing"][stage] = {"status": "failed", "error": str(e)}
+            
+            # Step 3: Auto-upload if requested
+            if auto_upload:
+                log.info("📤 Step 3: Auto-uploading approved videos...")
+                try:
+                    await self.process_workflow_stage("approval")
+                    results["stage_processing"]["approval"] = {"status": "completed"}
+                except Exception as e:
+                    log.error(f"❌ Error in approval stage: {e}")
+                    results["stage_processing"]["approval"] = {"status": "failed", "error": str(e)}
+            
+            # Generate summary
+            audio_success = sum(1 for r in results["audio_processing"] if r.get("status") == "success")
+            audio_total = len(results["audio_processing"])
+            video_success = sum(1 for r in results.get("video_processing", []) if r.get("status") == "success")
+            video_total = len(results.get("video_processing", []))
+            stage_success = sum(1 for s in results["stage_processing"].values() if s["status"] == "completed")
+            stage_total = len(results["stage_processing"])
+            
+            results["summary"] = {
+                "audio_files_processed": audio_total,
+                "audio_files_successful": audio_success,
+                "video_files_processed": video_total,
+                "video_files_successful": video_success,
+                "stages_processed": stage_total,
+                "stages_successful": stage_success,
+                "total_shorts_generated": sum(r.get("shorts_count", 0) for r in results["audio_processing"]) + sum(r.get("shorts_count", 0) for r in results.get("video_processing", [])),
+                "auto_upload_enabled": auto_upload
+            }
+            
+            log.info("✅ Comprehensive content processing completed!")
+            log.info(f"📊 Summary: {audio_success}/{audio_total} audio files, {stage_success}/{stage_total} stages")
+            
+            return results
+            
+        except Exception as e:
+            log.error(f"❌ Error in comprehensive processing: {str(e)}")
             raise
     
     async def process_workflow_stage(self, stage: str):
@@ -570,13 +761,22 @@ def status(project_name):
             click.echo(f"🎵 Audio Source: {project.audio_project.audio_file_path}")
             click.echo(f"🔤 Transcription: {project.audio_project.transcription_status}")
             click.echo(f"📱 Shorts: {project.audio_project.shortform_clips_count}")
+        
+        # Show video project details if it exists
+        if project.video_project:
+            click.echo(f"🎬 Video Source: {project.video_project.video_file_path}")
+            click.echo(f"📐 Dimensions: {project.video_project.video_width}x{project.video_project.video_height}")
+            click.echo(f"🔤 Transcription: {project.video_project.transcription_status}")
+            click.echo(f"✂️ Clip Generation: {project.video_project.clip_generation_status}")
+            click.echo(f"📱 Shorts: {project.video_project.shortform_clips_count}")
 
 
 @cli.command()
 @click.argument('audio_file_path', type=click.Path(exists=True))
 @click.option('--name', help='Project name')
 @click.option('--no-shorts', is_flag=True, help='Skip shortform content generation')
-def process_audio(audio_file_path, name, no_shorts):
+@click.option('--grayscale', is_flag=True, help='Convert all images to black and white')
+def process_audio(audio_file_path, name, no_shorts, grayscale):
     """Process an audio file to create videos and shorts."""
     driver = DomainSticksDriver()
     
@@ -584,7 +784,8 @@ def process_audio(audio_file_path, name, no_shorts):
         result = asyncio.run(driver.process_audio_file(
             audio_file_path, 
             project_name=name,
-            generate_shorts=not no_shorts
+            generate_shorts=not no_shorts,
+            grayscale=grayscale
         ))
         
         if result["status"] == "success":
@@ -592,6 +793,8 @@ def process_audio(audio_file_path, name, no_shorts):
             click.echo(f"📹 Main video: {result['main_video']['video_path']}")
             click.echo(f"⏱️ Duration: {result['main_video']['duration']:.1f}s")
             click.echo(f"🔍 Keywords: {', '.join(result['keywords'][:5])}")
+            if grayscale:
+                click.echo("🎨 Images converted to grayscale")
             
             if result.get("shorts"):
                 click.echo(f"📱 Generated {result['shorts_count']} shortform clips:")
@@ -636,6 +839,167 @@ def process_all_audio(no_shorts):
 
 
 @cli.command()
+@click.argument('video_file_path', type=click.Path(exists=True))
+@click.option('--name', help='Project name')
+@click.option('--no-shorts', is_flag=True, help='Skip shortform content generation')
+@click.option('--max-duration', default=60, type=int, help='Maximum duration for shorts (seconds)')
+@click.option('--min-duration', default=15, type=int, help='Minimum duration for shorts (seconds)')
+@click.option('--keep-original-format', is_flag=True, help='Keep original video format (don\'t convert to vertical)')
+@click.option('--add-subtitles', is_flag=True, help='Add subtitles to clips')
+def process_video(video_file_path, name, no_shorts, max_duration, min_duration, keep_original_format, add_subtitles):
+    """Process a video file to create short clips based on audio analysis."""
+    driver = DomainSticksDriver()
+    
+    try:
+        result = asyncio.run(driver.process_video_file(
+            video_file_path, 
+            project_name=name,
+            generate_shorts=not no_shorts,
+            max_short_duration=max_duration,
+            min_short_duration=min_duration,
+            convert_to_vertical=not keep_original_format,
+            add_subtitles=add_subtitles
+        ))
+        
+        if result["status"] == "success":
+            click.echo(f"✅ Successfully processed video: {result['project_name']}")
+            click.echo(f"📹 Original video: {result['original_video']['path']}")
+            click.echo(f"⏱️ Duration: {result['original_video']['duration']:.1f}s")
+            click.echo(f"📐 Dimensions: {result['original_video']['width']}x{result['original_video']['height']}")
+            click.echo(f"🔍 Keywords: {', '.join(result['keywords'][:5])}")
+            if not keep_original_format:
+                click.echo("📱 Clips converted to vertical format")
+            if add_subtitles:
+                click.echo("📝 Subtitles added to clips")
+            
+            if result.get("shorts"):
+                click.echo(f"📱 Generated {result['shorts_count']} shortform clips:")
+                for i, short in enumerate(result["shorts"], 1):
+                    click.echo(f"  {i}. {short['metadata']['title']} ({short['metadata']['duration']:.1f}s)")
+        else:
+            click.echo(f"❌ Processing failed: {result.get('message', 'Unknown error')}")
+    
+    except Exception as e:
+        click.echo(f"❌ Error: {str(e)}")
+
+
+@cli.command()
+@click.option('--no-shorts', is_flag=True, help='Skip shortform content generation')
+@click.option('--keep-original-format', is_flag=True, help='Keep original video format (don\'t convert to vertical)')
+@click.option('--add-subtitles', is_flag=True, help='Add subtitles to clips')
+def process_all_videos(no_shorts, keep_original_format, add_subtitles):
+    """Process all video files in the ingestion directory."""
+    driver = DomainSticksDriver()
+    
+    try:
+        results = asyncio.run(driver.process_all_video_files(
+            generate_shorts=not no_shorts,
+            convert_to_vertical=not keep_original_format,
+            add_subtitles=add_subtitles
+        ))
+        
+        success_count = sum(1 for r in results if r.get("status") == "success")
+        total_shorts = sum(r.get("shorts_count", 0) for r in results if r.get("status") == "success")
+        
+        click.echo(f"\n📊 Video batch processing complete:")
+        click.echo(f"✅ Successful: {success_count}")
+        click.echo(f"❌ Failed: {len(results) - success_count}")
+        click.echo(f"📱 Total shorts generated: {total_shorts}")
+        
+        # Show details for successful projects
+        for result in results:
+            if result.get("status") == "success":
+                click.echo(f"\n🎬 {result['project_name']}:")
+                click.echo(f"  📹 Original: {result['original_video']['path']}")
+                click.echo(f"  ⏱️ Duration: {result['original_video']['duration']:.1f}s")
+                if result.get("shorts"):
+                    click.echo(f"  📱 Shorts: {result['shorts_count']}")
+    
+    except Exception as e:
+        click.echo(f"❌ Error: {str(e)}")
+
+
+@cli.command()
+@click.option('--no-shorts', is_flag=True, help='Skip shortform content generation')
+@click.option('--auto-upload', is_flag=True, help='Automatically upload completed videos to YouTube')
+def process_all(no_shorts, auto_upload):
+    """Process ALL content through all phases - audio files, URL projects, everything!"""
+    driver = DomainSticksDriver()
+    
+    try:
+        click.echo("🚀 Starting comprehensive content processing...")
+        click.echo("📂 This will process ALL content types through ALL phases:")
+        click.echo("   🎵 Audio files → video creation")
+        click.echo("   🎬 Video files → short clip generation") 
+        click.echo("   🌐 URL-based projects → complete pipeline")
+        click.echo("   📍 All workflow stages → progression")
+        if auto_upload:
+            click.echo("   📤 Auto-upload enabled")
+        click.echo()
+        
+        results = asyncio.run(driver.process_all_content(
+            generate_shorts=not no_shorts,
+            auto_upload=auto_upload
+        ))
+        
+        # Display comprehensive summary
+        summary = results["summary"]
+        
+        click.echo("🎉 Comprehensive processing complete!")
+        click.echo("=" * 50)
+        
+        # Audio processing summary
+        click.echo(f"🎵 Audio Processing:")
+        click.echo(f"   ✅ Successful: {summary['audio_files_successful']}")
+        click.echo(f"   📁 Total files: {summary['audio_files_processed']}")
+        
+        # Video processing summary
+        click.echo(f"\n🎬 Video Processing:")
+        click.echo(f"   ✅ Successful: {summary['video_files_successful']}")
+        click.echo(f"   📁 Total files: {summary['video_files_processed']}")
+        
+        click.echo(f"\n📱 Total Shorts Generated: {summary['total_shorts_generated']}")
+        
+        # Stage processing summary
+        click.echo(f"\n🌐 Pipeline Stages:")
+        click.echo(f"   ✅ Completed: {summary['stages_successful']}")
+        click.echo(f"   📍 Total stages: {summary['stages_processed']}")
+        
+        # Show stage details
+        for stage, result in results["stage_processing"].items():
+            status_icon = "✅" if result["status"] == "completed" else "❌"
+            click.echo(f"     {status_icon} {stage}")
+            if result["status"] == "failed":
+                click.echo(f"       Error: {result['error']}")
+        
+        # Show successful audio projects
+        if results["audio_processing"]:
+            click.echo(f"\n🎵 Audio Projects Created:")
+            for result in results["audio_processing"]:
+                if result.get("status") == "success":
+                    click.echo(f"   📹 {result['project_name']}")
+                    if result.get("shorts"):
+                        click.echo(f"     📱 {result['shorts_count']} shorts")
+        
+        # Show successful video projects
+        if results.get("video_processing"):
+            click.echo(f"\n🎬 Video Projects Created:")
+            for result in results["video_processing"]:
+                if result.get("status") == "success":
+                    click.echo(f"   📹 {result['project_name']}")
+                    if result.get("shorts"):
+                        click.echo(f"     📱 {result['shorts_count']} shorts")
+        
+        if auto_upload:
+            click.echo(f"\n📤 Auto-upload: {'Enabled' if auto_upload else 'Disabled'}")
+        
+        click.echo(f"\n💡 Use 'python -m src.driver status <project_name>' to check individual projects")
+        
+    except Exception as e:
+        click.echo(f"❌ Error: {str(e)}")
+
+
+@cli.command()
 @click.argument('project_name')
 def show_shorts(project_name):
     """Show shortform clips for a project."""
@@ -663,6 +1027,40 @@ def show_shorts(project_name):
             click.echo(f"   🏷️ Tags: {', '.join(clip.tags) if clip.tags else 'None'}")
             click.echo(f"   📹 File: {clip.video_path}")
             click.echo(f"   ✅ Status: {clip.status}")
+
+
+@cli.command()
+def setup_openverse():
+    """Set up OpenVerse API credentials for media search."""
+    setup_openverse_credentials()
+
+
+@cli.command()
+def openverse_status():
+    """Check OpenVerse API authentication status."""
+    auth_manager = get_openverse_auth()
+    status = auth_manager.get_status()
+    
+    click.echo("🔑 OpenVerse API Status")
+    click.echo("=" * 30)
+    
+    if status["authenticated"]:
+        click.echo("✅ Authentication: Valid")
+        if status["token_expires_at"]:
+            click.echo(f"🕒 Token expires: {status['token_expires_at']}")
+    else:
+        click.echo("❌ Authentication: Invalid or missing")
+    
+    if status["has_app_registration"]:
+        click.echo("✅ Application: Registered")
+    else:
+        click.echo("❌ Application: Not registered")
+    
+    if status["client_id"]:
+        click.echo("✅ Credentials: Configured in .env")
+    else:
+        click.echo("❌ Credentials: Missing from .env")
+        click.echo("\n💡 Run 'python -m src.driver setup-openverse' to configure")
 
 
 if __name__ == "__main__":

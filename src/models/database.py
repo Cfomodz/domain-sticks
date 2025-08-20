@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Optional
 from sqlalchemy import (
     create_engine, Column, String, DateTime, Text, 
-    ForeignKey, Table, Integer, JSON, Boolean, Index
+    ForeignKey, Table, Integer, JSON, Boolean, Index, Float
 )
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship, sessionmaker
@@ -125,6 +125,7 @@ class Project(Base):
     segments = relationship("ProjectSegment", back_populates="project")
     shortform_clips = relationship("ShortformClip", back_populates="project")
     audio_project = relationship("AudioProject", back_populates="project", uselist=False)
+    video_project = relationship("VideoProject", back_populates="project", uselist=False)
 
 
 class ProjectSegment(Base):
@@ -247,6 +248,62 @@ class AudioProject(Base):
     __table_args__ = (
         Index('idx_audio_transcription_status', 'transcription_status'),
         Index('idx_audio_created', 'created_date'),
+    )
+
+
+class VideoProject(Base):
+    """Track video-to-clips projects specifically."""
+    __tablename__ = 'video_projects'
+    
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    project_id = Column(String(36), ForeignKey('projects.id'), nullable=False)
+    
+    # Video source information
+    video_file_path = Column(String, nullable=False)
+    video_duration = Column(Integer)  # in seconds
+    video_width = Column(Integer)
+    video_height = Column(Integer)
+    video_fps = Column(Float)
+    video_codec = Column(String)
+    video_format = Column(String)
+    video_size = Column(Integer)  # file size in bytes
+    
+    # Transcription data (from video's audio track)
+    transcription_text = Column(Text)
+    transcription_language = Column(String)
+    transcription_confidence = Column(JSON)  # Confidence scores per segment
+    word_timestamps = Column(JSON)  # Word-level timing data
+    
+    # Processing metadata
+    whisper_model_used = Column(String, default='base')
+    processing_time = Column(Integer)  # in seconds
+    keywords_extracted = Column(JSON)  # List of extracted keywords
+    
+    # Clip generation settings
+    converted_to_vertical = Column(Boolean, default=True)
+    added_subtitles = Column(Boolean, default=False)
+    max_clip_duration = Column(Integer, default=60)
+    min_clip_duration = Column(Integer, default=15)
+    
+    # Shortform generation
+    shortform_analysis_prompt = Column(Text)
+    shortform_analysis_response = Column(JSON)
+    shortform_clips_count = Column(Integer, default=0)
+    
+    # Status
+    transcription_status = Column(String, default='pending')  # pending, completed, failed
+    clip_generation_status = Column(String, default='pending')
+    
+    created_date = Column(DateTime, default=datetime.utcnow)
+    updated_date = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Relationships
+    project = relationship("Project", back_populates="video_project")
+    
+    # Indexes
+    __table_args__ = (
+        Index('idx_video_transcription_status', 'transcription_status'),
+        Index('idx_video_created', 'created_date'),
     )
 
 
