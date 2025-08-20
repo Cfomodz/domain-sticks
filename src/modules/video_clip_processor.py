@@ -45,6 +45,8 @@ class VideoClipProcessor:
             raise ImportError("Video clip processing dependencies not available. Please install whisper, moviepy, ffmpeg-python, and numpy.")
         
         self.db_manager = db_manager
+        self.video_width = settings.video_width
+        self.video_height = settings.video_height
         
         # Initialize Whisper model with GPU support
         try:
@@ -649,14 +651,20 @@ Respond with a JSON array of segments."""
             log.info(f"   📱 Convert to vertical: {convert_to_vertical}")
             log.info(f"   📝 Add subtitles: {add_subtitles}")
             
-            # Use ffmpeg to extract and process the clip
+            # Calculate clip duration
+            clip_duration = end_time - start_time
+            
+            # Use ffmpeg to extract and process the clip with overlays
             if self.device == "cuda":
                 input_stream = ffmpeg.input(str(video_file_path), ss=start_time, t=end_time-start_time, hwaccel='cuda')
             else:
                 input_stream = ffmpeg.input(str(video_file_path), ss=start_time, t=end_time-start_time)
             
+            # Add GIF overlays to the input stream
+            input_stream = self._add_gif_overlays(input_stream, clip_duration, convert_to_vertical)
+            
             if convert_to_vertical:
-                # Convert to vertical format (9:16)
+                # Convert to vertical format (9:16) - this is now integrated into the overlay function
                 log.info(f"   📱 Converting to vertical format...")
                 if self.device == "cuda":
                     log.info("   🚀 Using GPU-accelerated conversion")
@@ -664,7 +672,6 @@ Respond with a JSON array of segments."""
                     output_stream = ffmpeg.output(
                         input_stream,
                         str(output_path),
-                        vf=f"scale=w={self.video_width}:h={self.video_height}:force_original_aspect_ratio=decrease,pad={self.video_width}:{self.video_height}:(ow-iw)/2:(oh-ih)/2:black",
                         vcodec='h264_nvenc',
                         acodec='aac',
                         preset='fast',
@@ -677,7 +684,6 @@ Respond with a JSON array of segments."""
                     output_stream = ffmpeg.output(
                         input_stream,
                         str(output_path),
-                        vf=f"scale=w={self.video_width}:h={self.video_height}:force_original_aspect_ratio=decrease,pad={self.video_width}:{self.video_height}:(ow-iw)/2:(oh-ih)/2:black",
                         vcodec='libx264',
                         acodec='aac',
                         crf=23,
@@ -763,6 +769,133 @@ Respond with a JSON array of segments."""
         safe_title = safe_title[:50]  # Limit length
         
         return safe_title
+    
+    def _add_gif_overlays(self, input_stream, clip_duration: float, convert_to_vertical: bool = True):
+        """
+        Add GIF overlays (arrow and full_video) to the video stream for the last 3 seconds.
+        
+        Args:
+            input_stream: The main video input stream
+            clip_duration: Duration of the video clip in seconds
+            convert_to_vertical: Whether to convert to vertical format in the same filter chain
+            
+        Returns:
+            modified_stream: ffmpeg stream with overlays and optional vertical conversion applied
+        """
+        try:
+            # Paths to the GIF files
+            arrow_gif_path = settings.media_storage_path / "arrow.gif"
+            full_video_gif_path = settings.media_storage_path / "full_video.gif"
+            
+            # First, apply vertical conversion if requested
+            base_stream = input_stream
+            if convert_to_vertical:
+                base_stream = ffmpeg.filter(
+                    input_stream, 
+                    'scale', 
+                    w=self.video_width, 
+                    h=self.video_height, 
+                    force_original_aspect_ratio='decrease'
+                )
+                base_stream = ffmpeg.filter(
+                    base_stream, 
+                    'pad', 
+                    self.video_width, 
+                    self.video_height, 
+                    '(ow-iw)/2', 
+                    '(oh-ih)/2', 
+                    'black'
+                )
+            
+            # Check if GIF files exist
+            if not arrow_gif_path.exists() or not full_video_gif_path.exists():
+                log.warning("GIF overlay files not found, skipping overlays")
+                return base_stream
+            
+            # Calculate when to start showing overlays (last 3 seconds)
+            overlay_start_time = max(0, clip_duration - 3)
+            overlay_duration = 3.0  # Always show for 3 seconds
+            
+            # Create input streams for the GIFs with proper looping for 3 seconds
+            # Arrow GIF: 0.96s duration, needs to loop for 3 seconds
+            arrow_input = ffmpeg.input(str(arrow_gif_path), stream_loop=-1, t=overlay_duration)
+            
+            # Full video GIF: 5.01s duration, clip to 3 seconds (or loop if needed)
+            full_video_input = ffmpeg.input(str(full_video_gif_path), stream_loop=-1, t=overlay_duration)
+            
+            # Scale the full_video.gif to be larger and more visible (was 150px, now 600px wide)
+            full_video_scaled = ffmpeg.filter(full_video_input, 'scale', w=600, h=-1)
+            
+            # For additive blending, make black pixels transparent and white pixels bright
+            # Use colorkey to make black transparent for the full_video.gif
+            full_video_keyed = ffmpeg.filter(
+                full_video_scaled, 
+                'colorkey',
+                color='black',
+                similarity=0.3,
+                blend=0.1
+            )
+            
+            # Scale up the arrow.gif to 300x300 and convert black pixels to white pixels for additive blending
+            # This creates a "white matte" effect where black pixels become white
+            arrow_scaled = ffmpeg.filter(arrow_input, 'scale', w=300, h=300)
+            arrow_white = ffmpeg.filter(
+                arrow_scaled,
+                'geq',
+                r='if(alpha(X,Y),255,0)',  # If pixel has alpha, make it white, else transparent
+                g='if(alpha(X,Y),255,0)',
+                b='if(alpha(X,Y),255,0)',
+                a='alpha(X,Y)'  # Keep original alpha channel
+            )
+            
+            # First overlay: Add the full_video.gif with black made transparent
+            # Position: 20px from left, 20px from bottom of the FINAL frame (after vertical conversion)
+            overlay1 = ffmpeg.filter(
+                [base_stream, full_video_keyed],
+                'overlay',
+                x=20,
+                y='H-h-20',  # H-h-20 means: total height - overlay height - 20px margin
+                enable=f'gte(t,{overlay_start_time})',  # Enable only in last 3 seconds
+                format='auto'
+            )
+            
+            # Second overlay: Add the arrow.gif (now with white pixels) for bright white arrow effect
+            # Position it to the right of the full_video overlay
+            final_stream = ffmpeg.filter(
+                [overlay1, arrow_white],
+                'overlay',
+                x=650,  # 600 (full_video width) + 50px spacing
+                y='H-h-20',  # Same vertical position as full_video
+                enable=f'gte(t,{overlay_start_time})',  # Enable only in last 3 seconds
+                format='auto'
+            )
+            
+            log.info(f"✨ Added GIF overlays starting at {overlay_start_time:.1f}s for {overlay_duration}s duration")
+            
+            return final_stream
+            
+        except Exception as e:
+            log.error(f"❌ Error adding GIF overlays: {str(e)}")
+            # Return base stream (with vertical conversion if requested) if overlay fails
+            base_stream = input_stream
+            if convert_to_vertical:
+                base_stream = ffmpeg.filter(
+                    input_stream, 
+                    'scale', 
+                    w=self.video_width, 
+                    h=self.video_height, 
+                    force_original_aspect_ratio='decrease'
+                )
+                base_stream = ffmpeg.filter(
+                    base_stream, 
+                    'pad', 
+                    self.video_width, 
+                    self.video_height, 
+                    '(ow-iw)/2', 
+                    '(oh-ih)/2', 
+                    'black'
+                )
+            return base_stream
     
     def _generate_project_name(self, video_file_path: Path) -> str:
         """Generate a unique project name from video filename."""
